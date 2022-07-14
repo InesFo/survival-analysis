@@ -1,0 +1,573 @@
+---
+title: "Survival Analysis of breast feeding times"
+author: "Inês Fortes"
+date: "06/07/2020"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+  prettydoc::html_pretty:
+    highlight: github
+    theme: lumen
+header-includes:
+ \usepackage{float}
+ \floatplacement{figure}{H}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+
+library(KMsurv) 
+library(finalfit)
+library(survival)
+library(foreign)
+library(KMsurv)
+library(prodlim)
+#library(coxinterval)
+library("MASS")
+library("survival")
+library(mgcv)
+library(pracma)
+library(survminer)
+library(clustcurv)
+library(TH.data)
+library(flexsurv)
+library(relsurv) 
+library(smoothHR)
+library(arsenal)
+
+library(finalfit)
+library(plyr)
+library(dplyr)
+library(KMsurv)
+library(reshape2)
+
+
+data(bfeed)
+```
+
+
+## 1. Introduction
+
+In the past decade research has indicated that it is optimal for babies to be exclusively breast fed until 6 months-old (Kramer & Kakuma, 2012). However, not all mothers breast feed their babies, and from those who do it, not all of them continue until the sixth month. The reasons to stop breast feeding can be very diverse: they can be physical, psychological or even cultural (Wright & Schanler, 2001).
+
+The present study investigates the major factors involved in stopping breastfeeding. For that, I analyzed the 'bfeed' database from the R package "KMsurv" (Klein & Moeschberger, 1997). This database results from the National Longitudinal Survey of Youth which started in 1979 in the USA. This particular database was obtained from 1983 to 1988, when women in the survey were asked about their previous pregnancies (since 1978). This data set contains reports from 927 first-born children to mothers who chose to breast feed their baby. For this study I used survival analysis methods because this database includes some censored observations, that is, not all subjects reported the event (stop breast feeding) at the end of the survey.
+
+
+## 2. Exploratory data analysis
+
+The response variable is the duration of breast feeding. Thus, the time origin is the birth of the child and the event of interest is stopping breast feeding, signaled by the indicator variable ('delta'). 
+Table 1 shows the variables included in the database.
+
+
+```{r echo=FALSE, error=FALSE, message=FALSE, warning=FALSE}
+a<-c("duration","delta","race","poverty","smoke","alcohol","agemth","ybirth","yschool","pc3mth")
+b<-c("Duration of breast feeding in weeks","Indicator of completed breast feeding (1=yes, 0=no)","Race of mother (1=white, 2=black, 3=other)","Mother in poverty (1=yes, 0=no)","Mother smoked at birth of child (1=yes, 0=no)","Mother used alcohol at birth of child (1=yes, 0=no)","Age of mother at birth of child in years","Year of birth","Education level of mother (years of school)","Prenatal care after third month (1=yes, 0=no)")
+c<-cbind(a,b)
+colnames(c)<-c("Variable","Description")
+knitr::kable(c,caption= "Description of variables in bfeed", row.names=FALSE, align=c("l", "l", "r", "r"))
+```
+
+Note that agemth, ybirth and yschool are continuous variables while race, poverty, smoke, alcohol,and pc3mth are categorical variables (the former with 3 levels are the others with 2 levels). 
+The 'bfeed' database has 927 observations and no NA values. Only 35 observations were censored.
+
+Tables 2 and 3 show statistics for the categorial and continuous variables, respectively.
+
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE,results="hide"}
+bfeed <- transform(bfeed,race=factor(race), poverty=factor(poverty),smoke=factor(smoke),
+                   alcohol=factor(alcohol), pc3mth=factor(pc3mth))
+summary(bfeed)
+```
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+
+explanatory = c("race", "poverty", "smoke", "alcohol", "pc3mth")
+bfeed %>%
+  summary_factorlist(explanatory=explanatory, add_dependent_label=TRUE) -> t1
+#t1
+
+
+
+bfeed%>%group_by(race,poverty,smoke, alcohol,pc3mth,delta) %>%
+        summarize(N = n()) %>%
+        group_by(race,poverty,smoke, alcohol,pc3mth) %>% mutate(Tot = sum(N)) %>%
+        melt(measure.vars  = c("race","poverty","smoke","alcohol","pc3mth")) %>% group_by(variable,value) %>% mutate(GT = sum(N)) %>%
+        subset(delta == 0) %>%
+        summarize(c1 = sum(N),Tot = sum(Tot),GT =GT[1], C = sum(N)/GT[1])  -> t2
+
+t1$`censored (%)` <- sprintf("%d (%.1f)", t2$c1, t2$C*100)
+
+names(t1) <- c("Variable","X","N(%)","Censored(%)")
+
+t1$X <- c("White","Black","Other","No","Yes","No","Yes","No","Yes","No","Yes")
+
+names(t1) <- c("Variable","","N(%)","Censored(%)")
+
+knitr::kable(t1, caption= "Statistics of the categorical variables", row.names=FALSE, align=c("l", "l", "r", "r"))
+
+```
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+
+aux <- bfeed %>% select(agemth,ybirth,yschool) %>% melt() %>% group_by(variable) %>% summarise(Mean = mean(value),SD = sd(value), Min = min(value), Max = max(value))
+
+knitr::kable(aux, caption= "Statistics of the continuous variables", row.names=FALSE, align=c("l", "l", "r", "r"),digits=3)
+
+```
+
+From Table 2 we can see that most mothers were white (71.4%), were not in poverty (81.6%), did not smoke (70.9%) or drank alcohol during pregnancy (91.5%), and did not have prenatal care after the third month (82.3%). As said before, only a small percentage of observations (4%) were censored. From Table 3 we can see that mothers aged from 15 to 28 years-old (mean = 21.54), births occurred between 1978 and 1986 and mothers attended school for an average of 12.21 years (min = 3, max = 19).
+
+
+## 3. Estimation of Survival
+
+Even though the sample has a low number of censored observations, to obtain an empirical estimation of the survival function I used the nonparametric Kaplan-Meier estimator (Kaplan and Meier, 1958), which was specifically developed to deal with right censored data. For that, the estimator uses a redistribution to the right algorithm, by assuming that a censored time is equally likely to be observed in any point in the future. This estimator indicates $P(T > t)$, that is, the probability of observing an event after time t. This function starts at 1 and it is a decreasing  step function with steps only at the observed event times.  Figure \ref{fig:fig1} shows the Kaplan-Meier estimator curve for the breast feeding data.
+
+```{r fig1, echo=FALSE,warning=FALSE,error=FALSE,message=FALSE, fig.width=7,fig.height=6,fig.cap="\\label{fig:fig1}Kaplan-Meier estimator of survival."}
+
+fit<- prodlim(Hist(duration, delta) ~ 1, data=bfeed)
+plot(fit,type="surv")
+
+```
+
+Figure \ref{fig:fig2} shows that because there are only 4% of censored data, the empirical survival curve if there were no censored observations is very similar to the Kaplan-Meier estimator of survival. Also note that because of the distribution to the right algorithm the Kaplan-Meier estimator is always equal or above the empirical curve.
+
+```{r fig2, echo=FALSE,warning=FALSE,error=FALSE,message=FALSE, fig.width=7,fig.height=6,fig.cap="\\label{fig:fig2}Kaplan-Meier estimator of survival vs Empirical estimator."}
+
+
+fit1<-survfit(Surv(duration,delta)~1,data=bfeed) #KM
+fit2<-survfit(Surv(duration,rep(1,length(duration)))~1,data=bfeed) #empirico
+
+plot(fit1,xlab="time",ylab="Survival",conf.int = FALSE,main="")
+lines(fit2,xlab="time",ylab="Survival",conf.int = FALSE,add=TRUE,col=2)
+legend("topright",legend=c("KM","Empirical"),text.col=1:2)
+
+```
+
+The median survival time, i.e., the time at which 50% of the events have occurred can be estimated from the curve, and it is 12 weeks. The mean residual time is 16.87 weeks (SE = 0.614). Table 4 shows the survival estimates at different moments in time.
+
+```{r}
+km <- survfit(Surv(duration,delta)~1,data=bfeed)
+```
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+km <- survfit(Surv(duration,delta)~1,data=bfeed)
+x <- summary(km, times=c(1,4,8,12,16,20,24,32,40,48,72,96,144,192))
+tableSurv<-cbind(x$time,round(x$surv,3),
+                 c("0.899-0.935",
+                   "0.682-0.741",
+                   "0.500-0.565",
+                   "0.388-0.453",
+                   "0.309-0.371",
+                   "0.263-0.323",
+                   "0.190-0.244",
+                   "0.129-0.176",
+                   "0.088-0.129",
+                   "0.039-0.069",
+                   "0.006-0.021",
+                   "0.001-0.011",
+                   "0.000-0.008",
+                   "NA"))
+colnames(tableSurv)<-c("Week","Survival","95% CI")
+
+knitr::kable(tableSurv, caption= "Survival estimates at different weeks", row.names=FALSE, align=c("l", "l", "r", "l"))
+```
+
+From Table 4 we can see that after aproximately 1 month (4 weeks) only 71% of mothers were still breast feeding. We can also use the Kaplan-Meier estimator to estimate survival in different groups. At the end of approximately 6 months (24 weeks), the recommended time to feed babies with only milk (preferably, the mother's milk) the percentage of mothers still breast feeding drops to about 22%. We can also see that even though they are rare, there are mothers breast feeding their babies for more than 3 years.
+
+
+Kaplan-Meier estimates can also be computed for different groups. By plotting the survival functions for each categorical variable it was possible to observe that when curves differed, they did not cross. This might be an indication that the proportional hazards are held in this data. So, to check for differences between groups I ran log-rank tests (Mantel-cox tests) for each categorical variable. The results are shown in Table 5.
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+km.race<-survfit(Surv(duration,delta)~race,data=bfeed)
+# plot(km.race,main=" Kaplan-Meier estimates for race", xlab="weeks", ylab="survival",
+#      col=1:3, lty=1:3)
+# legend("topright",c("white","black", "other"),col=1:3,lty=1:3)
+LR.race<-survdiff(Surv(duration,delta)~race,data=bfeed)
+# With the log-rank test, with a significance level of 5% we reject H0.
+# Thus, survival differs across race.
+res<-pairwise_survdiff(Surv(duration,delta)~race,data=bfeed,p.adjust.method = "BH",rho=0)
+
+# There are differences between 1 and 3
+
+
+km.poverty<-survfit(Surv(duration,delta)~poverty,data=bfeed)
+# plot(km.poverty,main=" Kaplan-Meier estimate for poverty", xlab="weeks", ylab="survival",
+#      col=1:2, lty=1:2)
+# legend("topright",c("yes","no"),col=1:2,lty=1:2)
+LR.poverty<-survdiff(Surv(duration,delta)~poverty,data=bfeed)
+# With the log-rank test, with a significance level of 5% we do not reject H0.
+# Thus, survival does not differ across poverty.
+
+
+km.smoke<-survfit(Surv(duration,delta)~smoke,data=bfeed)
+# plot(km.smoke,main=" Kaplan-Meier estimate for smoke", xlab="weeks", ylab="survival",
+#      col=1:2, lty=1:2)
+# legend("topright",c("yes","no"),col=1:2,lty=1:2)
+LR.smoke<-survdiff(Surv(duration,delta)~smoke,data=bfeed)
+# With the log-rank test, with a significance level of 5% we reject H0.
+# Thus, survival differs across smoke
+
+
+km.alcohol<-survfit(Surv(duration,delta)~alcohol,data=bfeed)
+# plot(km.alcohol,main=" Kaplan-Meier estimate for alcohol", xlab="weeks", ylab="survival",
+#      col=1:2, lty=1:2)
+# legend("topright",c("yes","no"),col=1:2,lty=1:2)
+LR.alcohol<-survdiff(Surv(duration,delta)~alcohol,data=bfeed)
+# With the log-rank test, with a significance level of 5% we do not reject H0.
+# Thus, survival does not differ across alcohol
+
+km.pc3mth<-survfit(Surv(duration,delta)~pc3mth,data=bfeed)
+# plot(km.pc3mth,main=" Kaplan-Meier estimate for pc3mth", xlab="weeks", ylab="survival",
+#      col=1:2, lty=1:2)
+# legend("topright",c("yes","no"),col=1:2,lty=1:2)
+LR.pc3mth<-survdiff(Surv(duration,delta)~pc3mth,data=bfeed)
+# With the log-rank test, with a significance level of 5% we do not reject H0.
+# Thus, survival does not differ across pc3mth
+
+
+
+LR<-rbind(
+  cbind("race",round(LR.race$chisq,3),2,round(1-pchisq(LR.race$chisq,2),3)),
+  cbind("poverty",round(LR.poverty$chisq,3),1,round(1-pchisq(LR.poverty$chisq,1),3)),
+  cbind("smoke",round(LR.smoke$chisq,3),1,round(1-pchisq(LR.smoke$chisq,1),3)),
+  cbind("alcohol",round(LR.alcohol$chisq,3),1,round(1-pchisq(LR.alcohol$chisq,1),3)),
+  cbind("pc3mth",round(LR.pc3mth$chisq,3),1,round(1-pchisq(LR.pc3mth$chisq,1),3))
+  )
+
+colnames(LR)<-c("Variable", "Chi-Square","df","p-value")
+
+knitr::kable(LR, caption= "Log-rank tests for the categorical variables.", row.names=FALSE, align=c("l", "l", "r", "l"))
+```
+
+Only the race and smoke variables showed differences in the survival curves. Figure \ref{fig:fig3} shows that non-smokers took more time to stop breast feeding.
+
+```{r fig3, echo=FALSE,warning=FALSE,error=FALSE,message=FALSE, fig.width=7,fig.height=6,fig.cap="\\label{fig:fig3}Kaplan-Meier estimator of survival for smokers and non-smokers."}
+
+km.smoke<-survfit(Surv(duration,delta)~smoke,data=bfeed)
+plot(km.smoke, xlab="weeks", ylab="survival",
+     col=1:2, lty=1:2)
+legend("topright",c("non-smoker","smoker"),col=1:2,lty=1:2)
+LR.smoke<-survdiff(Surv(duration,delta)~smoke,data=bfeed)
+# With the log-rank test, with a significance level of 5% we reject H0.
+# Thus, survival differs across smoke
+
+```
+
+Regarding race, Figure \ref{fig:fig4} shows that there seems to be no difference in the survival curves between white and black mothers, but the mothers in the 'other' category curve seems to be below the other two. In fact, a post hoc pairwise comparison with BH correction (Benjamini & Hochberg, 1995) between races showed that there is only a difference between white mothers and  mothers from other races (p = 0.016).
+
+R Code for pairwise comparisons:
+```{r}
+res <- pairwise_survdiff(Surv(duration,delta)~race,data=bfeed,p.adjust.method = "BH",rho=0)
+```
+
+
+```{r fig4, echo=FALSE,warning=FALSE,error=FALSE,message=FALSE, fig.width=7,fig.height=6,fig.cap="\\label{fig:fig4}Kaplan-Meier estimator of survival for race."}
+
+km.race<-survfit(Surv(duration,delta)~race,data=bfeed)
+plot(km.race, xlab="weeks", ylab="survival", col=c(1,2,4), lty=1:3)
+legend("topright",c("white","black", "other"),col=c(1,2,4),lty=1:3)
+LR.race<-survdiff(Surv(duration,delta)~race,data=bfeed)
+# With the log-rank test, with a significance level of 5% we reject H0.
+# Thus, survival differs across race.
+res<-pairwise_survdiff(Surv(duration,delta)~race,data=bfeed,p.adjust.method = "BH",rho=0)
+
+# There are differences between 1 and 3
+```
+
+
+To check if there were differences in the survival curves according to the mother's age, mother's education or baby's birth year, these variables were categorized such that each category holds approximately the same number of observations (or at least a symmetrical number). The resulting distributions are presented in Tables 6, 7 and 8.
+
+
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+
+age1 <- cut(bfeed$agemth, breaks=c(0, 18,21,24,28)) 
+#table(age1)
+bfeed<-cbind(bfeed,age1)
+km.age1<-survfit(Surv(duration,delta)~age1,data=bfeed)
+# plot(km.age1,main=" Kaplan-Meier estimate for age", xlab="weeks", ylab="survival", col=1:4, lty=1:4)
+# legend("topright",c("15-18","18-21","21-24","24-28"),col=1:4,lty=1:4)
+LR.age1<-survdiff(Surv(duration,delta)~age1,data=bfeed)
+#no diff
+
+a<-c("15-18","18-21","21-24","24-28")
+b<-c(110,370,303,144)
+c<-cbind(a,b)
+colnames(c)<-c("Mother Age categories","N")
+
+knitr::kable(c, caption= "Mother Age categories", row.names=FALSE, align=c("l", "l", "r", "l"))
+```
+
+
+
+
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+#table(bfeed$ybirth)
+y2 <- cut(bfeed$ybirth, breaks=c(0, 80,83,86)) #breaks= aberto à esquerda, fechado à direita
+#table(y2)
+bfeed<-cbind(bfeed,y2)
+km.y2<-survfit(Surv(duration,delta)~y2,data=bfeed)
+# plot(km.y2,main=" Kaplan-Meier estimate for year of birth", xlab="weeks", ylab="survival",
+#      col=1:3, lty=1:3)
+# legend("topright",c("78-80","81-83","84-86"),col=1:3,lty=1:3)
+LR.y2<-survdiff(Surv(duration,delta)~y2,data=bfeed)
+#diff
+res<-pairwise_survdiff(Surv(duration,delta)~y2,data=bfeed,p.adjust.method = "BH",rho=0)
+
+a<-c("78-80","81-83","84-86")
+b<-c(249,414,264)
+c<-cbind(a,b)
+colnames(c)<-c("Year of birth categories","N")
+
+knitr::kable(c, caption= "Year of birth categories", row.names=FALSE, align=c("l", "l", "r", "l"))
+
+```
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+#table(bfeed$yschool)
+ys2 <- cut(bfeed$yschool, breaks=c(2,11, 12,19)) #breaks= aberto à esquerda, fechado à direita
+#table(ys2 )
+bfeed<-cbind(bfeed,ys2 )
+km.ys2<-survfit(Surv(duration,delta)~ys2 ,data=bfeed)
+# plot(km.ys2 ,main=" Kaplan-Meier estimate for years of school", xlab="weeks", ylab="survival",
+#      col=1:3, lty=1:3)
+# legend("topright",c("3-11","12","12-19"),col=1:3,lty=1:3)
+LR.ys2<-survdiff(Surv(duration,delta)~ys2,data=bfeed)
+#diff
+res<-pairwise_survdiff(Surv(duration,delta)~ys2,data=bfeed,p.adjust.method = "BH",rho=0)
+
+a<-c("3-11","12","12-19")
+b<-c(220,438,269)
+c<-cbind(a,b)
+colnames(c)<-c("Years of school categories","N")
+
+knitr::kable(c, caption= "Years of school categories", row.names=FALSE, align=c("l", "l", "r", "l"))
+```
+
+Table 9 shows that there are differences between the categories in the year of birth and the mother's years of school. Post hoc pairwise comparison with BH corrections showed that in both variables the differences occur between the two extreme categories. There are differences in the survival curves between births before 1980 and those after 1984 (p = 0.0082), and there are differences between attending school for less than 12 years and more than 12 years (p = 0.033). The other comparisons were not statistically significant.
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+LR<-rbind(
+  cbind("agemth",round(LR.age1$chisq,3),2,round(1-pchisq(LR.age1$chisq,2),3)),
+  cbind("ybirth",round(LR.y2$chisq,3),1,round(1-pchisq(LR.y2$chisq,1),3)),
+  cbind("yschool",round(LR.ys2$chisq,3),1,round(1-pchisq(LR.ys2$chisq,1),3))
+  )
+
+colnames(LR)<-c("Variable", "Chi-Square","df","p-value")
+
+knitr::kable(LR, caption= "Log-rank tests for the continuous variables (after categorization).", row.names=FALSE, align=c("l", "l", "r", "l"))
+```
+
+## 4. Univariate Cox analysis
+
+To analyze the effect of the covariates in the breast feeding times I first fitted a Cox regression model to each variable, and then fitted a multiple regression with all the variables. One important assumption of this model is that there should be proportional hazards, that is, the hazard curves should not cross. In the analysis of the Kaplan-Meier survival curves that seemed to be the case for all variables, so I proceeded with the Cox model. It is important that the reference category has a sufficient number of observations to be able to detect differences between groups. Therefore, for the categorical variables the reference category always contained more observations than the other categories. 
+
+Table 10 shows the results for the simple Cox regression.
+
+```{r, echo=FALSE, warning=FALSE,error=FALSE,message=FALSE}
+#QUANTITATIVE VARIABLES
+
+cox.agemth<-coxph(Surv(duration,delta)~agemth,data=bfeed)
+# cox.agemth
+# #age does not significantly affect the hazard ratio.
+# round(exp(cox.agemth$coefficients),3) #HR
+# round(exp(cox.agemth$coefficients[[1]]-qnorm(0.975)*sqrt(cox.agemth$var)),3)#IC
+# round(exp(cox.agemth$coefficients[[1]]+qnorm(0.975)*sqrt(cox.agemth$var)),3)#IC
+# round(1-pchisq(cox.agemth$score,1),3)#p-value
+
+cox.ybirth<-coxph(Surv(duration,delta)~ybirth,data=bfeed)
+# summary(cox.ybirth)
+# #year of birth significantly affects the hazard ratio. Per year, the risk increases 5%
+# round(exp(cox.ybirth$coefficients),3) #HR
+# round(exp(cox.ybirth$coefficients[[1]]-qnorm(0.975)*sqrt(cox.ybirth$var)),3)#IC
+# round(exp(cox.ybirth$coefficients[[1]]+qnorm(0.975)*sqrt(cox.ybirth$var)),3)#IC
+# round(1-pchisq(cox.ybirth$score,1),3)#p-value
+
+cox.yschool<-coxph(Surv(duration,delta)~yschool,data=bfeed)
+# summary(cox.yschool)
+# #years of school significantly affects the hazard ratio. Per year, the risk decreases 5%
+# round(exp(cox.yschool$coefficients),3) #HR
+# round(exp(cox.yschool$coefficients[[1]]-qnorm(0.975)*sqrt(cox.yschool$var)),3)#IC
+# round(exp(cox.yschool$coefficients[[1]]+qnorm(0.975)*sqrt(cox.yschool$var)),3)#IC
+# round(1-pchisq(cox.yschool$score,1),3)#p-value
+
+
+#QUALITATIVE VARIABLES
+#table(bfeed$race)
+cox.race<-coxph(Surv(duration,delta)~factor(race),data=bfeed)
+# summary(cox.race)
+# #There is a difference between race 3 and race 1.Being of other race compared with being white 
+# #increases the risk by approximately 29%.
+# #1 vs 2
+# round(exp(cox.race$coefficients[1]),3) #HR
+# round(exp(cox.race$coefficients[1]-qnorm(0.975)*sqrt(cox.race$var[1,1])),3)#IC
+# round(exp(cox.race$coefficients[1]+qnorm(0.975)*sqrt(cox.race$var[1,1])),3)#IC
+# round(2*(1-pnorm(1.081)),3)
+# #1 vs 3
+# round(exp(cox.race$coefficients[2]),3) #HR
+# round(exp(cox.race$coefficients[2]-qnorm(0.975)*sqrt(cox.race$var[2,2])),3)#IC
+# round(exp(cox.race$coefficients[2]+qnorm(0.975)*sqrt(cox.race$var[2,2])),3)#IC
+# round(2*(1-pnorm(2.751)),3)
+
+#table(bfeed$poverty)
+cox.poverty<-coxph(Surv(duration,delta)~factor(poverty),data=bfeed)
+# summary(cox.poverty)
+# #There is no effect of poverty on the hazard ratio.
+# #1 vs 2
+# round(exp(cox.poverty$coefficients[1]),3) #HR
+# round(exp(cox.poverty$coefficients[1]-qnorm(0.975)*sqrt(cox.poverty$var[1,1])),3)#IC
+# round(exp(cox.poverty$coefficients[1]+qnorm(0.975)*sqrt(cox.poverty$var[1,1])),3)#IC
+# round(2*(1-pnorm(0.88)),3)
+
+
+#table(bfeed$smoke)
+cox.smoke<-coxph(Surv(duration,delta)~factor(smoke),data=bfeed)
+# summary(cox.smoke)
+# #There an effect of somke on the hazard ratio.
+# #1 vs 2
+# round(exp(cox.smoke$coefficients[1]), 3) #HR
+# round(exp(cox.smoke$coefficients[1] - qnorm(0.975) * sqrt(cox.smoke$var[1, 1])), 3)#IC
+# round(exp(cox.smoke$coefficients[1] + qnorm(0.975) * sqrt(cox.smoke$var[1, 1])), 3)#IC
+# round(2 * (1 - pnorm(3.079)), 3)
+# summary(cox.smoke)
+# #There an effect of somke on the hazard ratio.
+# #1 vs 2
+# round(exp(cox.smoke$coefficients[1]), 3) #HR
+# round(exp(cox.smoke$coefficients[1] - qnorm(0.975) * sqrt(cox.smoke$var[1, 1])), 3)#IC
+# round(exp(cox.smoke$coefficients[1] + qnorm(0.975) * sqrt(cox.smoke$var[1, 1])), 3)#IC
+# round(2 * (1 - pnorm(3.079)), 3)
+
+
+#table(bfeed$alcohol)
+cox.alcohol<-coxph(Surv(duration,delta)~factor(alcohol),data=bfeed)
+# summary(cox.alcohol)
+# #There no effect of alcohol on the hazard ratio.
+# #1 vs 2
+# round(exp(cox.alcohol$coefficients[1]),3) #HR
+# round(exp(cox.alcohol$coefficients[1]-qnorm(0.975)*sqrt(cox.alcohol$var[1,1])),3)#IC
+# round(exp(cox.alcohol$coefficients[1]+qnorm(0.975)*sqrt(cox.alcohol$var[1,1])),3)#IC
+# round(2*(1-pnorm(1.378)),3)
+
+#table(bfeed$pc3mth)
+cox.pc3mth<-coxph(Surv(duration,delta)~factor(pc3mth),data=bfeed)
+# summary(cox.pc3mth)
+# #There no effect of pc3mth on the hazard ratio.
+# #1 vs 2
+# round(exp(cox.pc3mth$coefficients[1]),3) #HR
+# round(exp(cox.pc3mth$coefficients[1]-qnorm(0.975)*sqrt(cox.pc3mth$var[1,1])),3)#IC
+# round(exp(cox.pc3mth$coefficients[1]+qnorm(0.975)*sqrt(cox.pc3mth$var[1,1])),3)#IC
+# round(2*(1-pnorm(0.399)),3)
+
+
+
+t2<-c("Variable", " ", "HR","95% CI", "p-value")
+ucox<-rbind(
+            cbind("agemth"," ",0.994,"0.968-1.020",0.632),
+            cbind("ybirth"," ",1.051,"1.017-1.086",0.003),
+            cbind("yschool"," ",0.956 ,"0.924-0.989",0.009),
+            cbind("race","white",1," "," "),
+            cbind(" ","black",1.117,"0.914-1.365",0.280),
+            cbind(" ","other",1.290,"1.076-1.546",0.006),
+            cbind("poverty","no",1," "," "),
+            cbind(" ","yes",0.927,"0.783-1.098",0.379),
+            cbind("smoke","no",1," "," "),
+            cbind(" ","yes",1.255,"1.086-1.45",0.002),
+            cbind("alcohol","no",1," "," "),
+            cbind(" ","yes",1.18,"0.932-1.494",0.168),
+            cbind("pc3mth","no",1," "," "),
+            cbind(" ","yes",1.036,"0.871-1.231",0.690)
+)
+colnames(ucox)<-t2
+
+knitr::kable(ucox, caption= "Univariate Cox regression.", row.names=FALSE, align=c("l", "l", "l", "l","l"))
+```
+
+Congruent with the Kaplan-Meier survival curves analysis, the variables that seem to significantly affect breast feeding times are: year of birth (ybirth), mother's years of education (yschool), race (between whites and other races) and smoking.
+The strongest predictor of stopping breast feeding seems to be being of other race, where the hazard ratio is 1.29, meaning that a mother of other race is 29% more likely to stop breast feeding. Similarly, smoking increases the hazard in 26%. Concerning the year of birth, the results indicate that for each year the hazard increases by 5%. Finally, per each year the mother studies, the hazard of stop breast feeding decreases by 5%.
+
+### 4.1 Assumption of proportional hazard ratio
+
+Before proceeding for a multivariate cox regression, and even though a visual inspection was already done, it is important to test for the proportional hazard ratio assumption. For that, the Schoenfeld residuals are tested, as these should be independent of time when the assumption of proportional hazard ratio is held. The cox.zph() function in R tests the independence of Schoenfeld residuals across time of each covariate as well as the global model. 
+
+```{r, echo=TRUE, warning=FALSE,error=FALSE,message=FALSE}
+fit<-coxph(Surv(duration,delta)~
+             factor(race)+
+             factor(poverty)+
+             factor(smoke)+
+             factor(alcohol)+
+             factor(pc3mth)+
+             agemth+
+             ybirth+
+             yschool,data=bfeed)
+cox.zph(fit)
+```
+
+The global test is not statistically significant, meaning that globally the assumption of proportional hazards is held. In any case, the two variables that could possibly pose some problems are agemth and yschool. As these are continuous variables, one possibility is to include nonlinear effects and recheck the assumption of the proportional hazard ratios.  
+
+```{r, echo=TRUE, warning=FALSE,error=FALSE,message=FALSE}
+fit2<-coxph(Surv(duration,delta)~
+             factor(race)+
+             factor(poverty)+
+             factor(smoke)+
+             factor(alcohol)+
+             factor(pc3mth)+
+             pspline(agemth)+
+             ybirth+
+             pspline(yschool),data=bfeed)
+cox.zph(fit2)
+fit2
+```
+
+Adding a nonlinear effect on agemth seems to improve the model, because the p-value increases from 
+0.054 to 0.348. In fact the Cox regression results indicate that this variable should be added with a nonlinear effect (p =  0.071). For the yschool adding a nonlinear effect does not seem to improve the model, and this variable should be added with a linear effect (p = 0.022).
+
+In the next two plots we can see the regression terms against their predictors (and standard errors) for the agemth and yschool variables with nonlinear effects. We can easily fit a straight line within the confidence intervals bands for yschool (i.e., a linear effect is plausible). The reason for wider bands on the extreme values may be due to the low number of observations on the extremes. On the other hand, for the mother's age (agemth), it seems that young mothers have an increased hazard of stopping breast feeding, which declines at about 19 years-old and slightly increases again for ages above 19.
+
+```{r fig5, echo=FALSE,warning=FALSE,error=FALSE,message=FALSE, fig.width=7,fig.height=6,fig.cap="\\label{fig:fig5}Kaplan-Meier estimator of survival."}
+fit3<-coxph(Surv(duration,delta)~
+             pspline(yschool)+
+              pspline(agemth),data=bfeed)
+termplot(fit3, se=T)
+
+```
+
+## 5. Multivariate Cox Model
+
+Next, the step() function is applied to the multivariate cox model with all variables. This function computes the AIC for the model without each variable, and on each step it eliminates the variable if it increases the AIC until this metric can not be further minimized.
+
+```{r}
+fit4<-coxph(Surv(duration,delta)~
+             factor(race)+
+             factor(poverty)+
+             factor(smoke)+
+             factor(alcohol)+
+             factor(pc3mth)+
+             pspline(agemth)+
+             ybirth+
+             yschool,data=bfeed)
+step(fit4)
+```
+
+As expected, the final model includes race, poverty, smoke, year of birth and mother's education as factors that significantly increase the hazard of stopping breast feeding. Compared to being white, being black increases the hazard by 21%, and being of other race increases the hazard by 34%. Being in poverty decreases the hazard by 22%. Mothers who smoke are 30% more likely of stopping breast feeding. Moreover, each increment in the year of birth (between 1978 and 1986) increases the hazard by 7%. At last, each increment in the number of years that mothers studied decreases the hazard by 7%.
+
+## 6. Conclusion
+
+In this study a series of survival analysis methods were applied to understand which are the major risk factors to stop breast feeding. Because this data set has a low number of censored observations, probably a common regression would wild similar results (the author tested a multiple linear regression and the conclusions would be very similar). However, by using these methods we are able to use all information contained in the database.
+
+These results need to be interpreted within their context: they refer to mothers in the USA from 1978 to 1986. The factors that increased the hazard of stopping breast feeding were being not white in race, smoking, and the year of birth. It is possible that there was a white privilege, in which mothers of other races, for the nature of their jobs, had to start working earlier or more hours, making it more difficult to breast feed their babies. At the same time, as years passed by, from 1978 to 1986, more women became independent and started working, so it seems reasonable to expect them to be less available to breast feed. At last, although it is not clear why smoking (but not drinking) influences breast feeding, in can be for health or cultural reasons (e.g., mothers can get sick more easily, mothers don't like to breast feed after smoking). Contrarily, the two variables that decreased the hazard was being poor, and having more years of education. Breast feeding is the cheapest way to feed a baby, so it makes sense that poor mothers resort to this feeding more frequently. Concerning the years of school, it is possible that mothers who studied more have better jobs that allow them to better conciliate work and family life. It would be interesting to study this topic in a more recent database, comparing different countries.
+
+
+## 7. References
+
+Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. Journal of the Royal statistical society: series B (Methodological), 57(1), 289-300.
+
+Kaplan, E. L., & Meier, P. (1958). Nonparametric estimation from incomplete observations. Journal of the American statistical association, 53(282), 457-481.
+
+Klein and Moeschberger (1997) Survival Analysis Techniques for Censored and truncated data, Springer. National Longitudinal Survey of Youth Handbook The Ohio State University, 1995.
+
+Kramer, M. S., & Kakuma, R. (2012). Optimal duration of exclusive breastfeeding. Cochrane database of systematic reviews, (8).
+
+Wright, A. L., & Schanler, R. J. (2001). The resurgence of breastfeeding at the end of the second millennium. The Journal of nutrition, 131(2), 421S-425S.
