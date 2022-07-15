@@ -16,31 +16,16 @@ header-includes:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-#knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
 
-# library(coxinterval)
-
-# library("MASS")
-# library("survival")
-# library(arsenal)
-# library(clustcurv)
- library(dplyr)
- library(finalfit)
-# library(flexsurv)
-# library(foreign)
- library(KMsurv)
-# library(mgcv)
-# library(plyr)
-# library(pracma)
- library(prodlim)
-# library(relsurv) 
- library(reshape2)
-# library(smoothHR)
- library(stringr)
- library(survival)
- library(survminer)
-# library(TH.data)
- library(tidyr)
+library(dplyr)
+library(finalfit)
+library(KMsurv)
+library(prodlim)
+library(reshape2)
+library(stringr)
+library(survival)
+library(survminer)
+library(tidyr)
 
 data(bfeed) #from KMsurv
 ```
