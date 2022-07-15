@@ -2,7 +2,7 @@
 
 The present study investigates the major factors involved in stopping breastfeeding. :breast_feeding: :woman_feeding_baby:
 
-Because this database includes some censored observations, that is, not all subjects reported the event (stop breastfeeding) at the end of the survey, I used survival analysis statistcial methods to analyse the results.
+Because this database includes some censored observations, that is, not all subjects reported the event (stop breastfeeding) at the end of the survey, I used survival analysis statistical methods to analyse the results.
 
 #### Files:
 - *survival-analysis.Rmd* - this is the R markdown file
